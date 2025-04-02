@@ -172,3 +172,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+data/smpl
+scripts/outputs
+
+*.pt
+*.TXT

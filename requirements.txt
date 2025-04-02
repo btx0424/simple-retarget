@@ -1,0 +1,6 @@
+scipy
+smplx
+mujoco
+torch
+pytorch-kinematics
+open3d

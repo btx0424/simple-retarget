@@ -1,0 +1,15 @@
+[project]
+name = "motion-guide"
+version = "0.1.0"
+
+dependencies = [
+    'scipy',
+    'torch',
+    'smplx',
+    'mujoco',
+    'open3d',
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
