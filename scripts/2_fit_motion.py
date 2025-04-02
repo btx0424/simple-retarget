@@ -142,9 +142,7 @@ def main(cfg):
         robot_keypoints = robot_rotmat.unsqueeze(1) @ (robot_keypoints - root_translation).unsqueeze(-1)
         robot_keypoints = robot_keypoints.squeeze(-1) + trans.unsqueeze(1)
         return robot_keypoints
-    
-    from tqdm import tqdm
-    
+        
     for i in range(200):
         robot_keypoints = get_robot_keypoints(robot_th, robot_trans)
         loss = nn.functional.mse_loss(robot_keypoints, smpl_keypoints)

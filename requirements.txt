@@ -4,3 +4,4 @@ mujoco
 torch
 pytorch-kinematics
 open3d
+hydra-core
