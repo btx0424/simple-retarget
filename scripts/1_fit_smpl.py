@@ -79,24 +79,25 @@ def main(cfg):
     chain.print_tree()
     robot_body_names = chain.get_link_names()
 
+    # compute the rest-pose body transforms in the root (base link)'s frame
     th = torch.zeros([1, chain.n_joints])
-    robot_rest_pose = chain.forward_kinematics(th)
+    robot_body_pose = chain.forward_kinematics(th) 
 
     body_model = SMPL(model_path=os.path.join(DATA_PATH, "smpl"), gender="neutral")
 
     # which joints to match
     robot_joint_idx = []
     smpl_joint_idx = []
-    fit_target = []
+    robot_keypoints = []
     for robot_body_name, smpl_joint_name in cfg.robot.joint_matches:
         robot_joint_idx.append(robot_body_names.index(robot_body_name))
         smpl_joint_idx.append(SMPL_BONE_ORDER_NAMES.index(smpl_joint_name))
-        fit_target.append(robot_rest_pose[robot_body_name].get_matrix()[:, :3, 3])
+        robot_keypoints.append(robot_body_pose[robot_body_name].get_matrix()[:, :3, 3])
     
-    root_translation = robot_rest_pose[robot_body_names[0]].get_matrix()[:, :3, 3]
-    fit_target = torch.stack(fit_target, dim=1)
-    fit_target = fit_target - root_translation.unsqueeze(1)
-    print(fit_target)
+    root_translation = robot_body_pose[robot_body_names[0]].get_matrix()[:, :3, 3]
+    robot_keypoints = torch.stack(robot_keypoints, dim=1)
+    robot_keypoints = robot_keypoints - root_translation.unsqueeze(1)
+    print(robot_keypoints)
 
     transl_0 = torch.zeros([1, 3])
     pose_0 = torch.zeros([1, 24, 3])
@@ -127,7 +128,7 @@ def main(cfg):
         return mesh
     
     vertices = []
-    fitted_history = []
+    smpl_keypoints_history = []
 
     ITERS = 200
     for i in range(ITERS):
@@ -138,9 +139,9 @@ def main(cfg):
             transl=transl_0
         )
         pelvis = result.joints[:, None, 0]
-        fitted = (result.joints[:, smpl_joint_idx] - pelvis) * scale
+        smpl_keypoints = (result.joints[:, smpl_joint_idx] - pelvis) * scale
         
-        loss = (fit_target - fitted).square().sum()
+        loss = (robot_keypoints - smpl_keypoints).square().sum()
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -148,7 +149,7 @@ def main(cfg):
             with torch.no_grad():
                 v = (result.vertices[0] - result.joints[:, 0]) * scale
             vertices.append(v)
-            fitted_history.append(fitted[0].detach())
+            smpl_keypoints_history.append(smpl_keypoints[0].detach())
             print(f"iter {i}, loss: {loss.item():.3f}")
     
     vis = o3d.visualization.Visualizer()
@@ -158,7 +159,6 @@ def main(cfg):
     frame.compute_vertex_normals()
     vis.add_geometry(frame)
 
-    # Get the render option
     for i, v in enumerate(vertices):
         offset = torch.tensor([0., i, 0.])
         v = v + offset + torch.tensor([2., 0., 0.])
@@ -166,19 +166,20 @@ def main(cfg):
         vis.add_geometry(mesh)
 
         pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(fitted_history[i] + offset + torch.tensor([1., 0., 0.]))
-        pcd.colors = o3d.utility.Vector3dVector([[0, 0, 1] for _ in range(len(fitted_history[i]))])
+        pcd.points = o3d.utility.Vector3dVector(smpl_keypoints_history[i] + offset + torch.tensor([1., 0., 0.]))
+        pcd.colors = o3d.utility.Vector3dVector([[0, 0, 1] for _ in range(len(smpl_keypoints_history[i]))])
         vis.add_geometry(pcd)
 
         pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(fit_target[0] + offset)
-        pcd.colors = o3d.utility.Vector3dVector([[1, 0, 0] for _ in range(len(fit_target[0]))])
+        pcd.points = o3d.utility.Vector3dVector(robot_keypoints[0] + offset)
+        pcd.colors = o3d.utility.Vector3dVector([[1, 0, 0] for _ in range(len(robot_keypoints[0]))])
         vis.add_geometry(pcd)
     
     
     path = os.path.join(os.path.dirname(__file__), f"{cfg.robot.humanoid_type}_shape.pt")
     torch.save({"betas": betas.data, "scale": scale.data}, path)
 
+    # Get the render option
     opt = vis.get_render_option()
     # Set the point size
     point_size = 10.0  # You can adjust this value according to your needs
