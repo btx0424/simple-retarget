@@ -5,9 +5,16 @@ import hydra
 import numpy as np
 import pytorch_kinematics as pk
 import xml.etree.ElementTree as ET
+import glob
+import multiprocessing as mp
+import pathlib
 
 from smplx import SMPL
 from scipy.spatial.transform import Rotation as sRot
+
+OMP_NUM_THREADS = int(os.environ.get("OMP_NUM_THREADS", "1"))
+if OMP_NUM_THREADS <= 1:
+    raise ValueError("Set OMP_NUM_THREADS > 1 to enable multiprocessing. Current value: %s" % OMP_NUM_THREADS)
 
 CONDIF_PATH = os.path.join(os.path.dirname(__file__), "../cfg")
 DATA_PATH = os.path.join(os.path.dirname(__file__), "../data")
@@ -73,17 +80,14 @@ def build_chain(cfg) -> pk.Chain:
     os.chdir(cwd)
     return chain
 
-
-@hydra.main(config_path=CONDIF_PATH, config_name="config", version_base=None)
-def main(cfg):
+def fit_motion(cfg, motion_path: str):
+    with open(motion_path, "rb") as f:
+        raw = dict(np.load(f))
+    print(motion_path)
+    
     chain = build_chain(cfg.robot)
     chain.forward_kinematics(torch.zeros(1, chain.n_joints))
 
-    motion_path = os.path.join(DATA_PATH, "motion", "0005_Walking001_poses.npz")
-
-    with open(motion_path, "rb") as f:
-        raw = dict(np.load(f))
-    
     T = raw["poses"].shape[0]
     body_pose = raw["poses"][:, :66]
     body_pose = torch.as_tensor(body_pose, dtype=torch.float32)
@@ -95,7 +99,6 @@ def main(cfg):
         "betas": torch.as_tensor(raw["betas"], dtype=torch.float32),
         "fps": raw["mocap_framerate"].item()
     }
-
     body_model = SMPL(model_path=os.path.join(DATA_PATH, "smpl"), gender="neutral")
 
     path = os.path.join(os.path.dirname(__file__), f"{cfg.robot.humanoid_type}_shape.pt")
@@ -149,74 +152,36 @@ def main(cfg):
         opt.zero_grad()
         loss.backward()
         opt.step()
-        if i % 10 == 0:
-            print(f"iter {i}, loss {100 * loss.item():.3f}")
     robot_keypoints = robot_keypoints.detach()
     
     motion_name = motion_path.split("/")[-1].split(".")[0]
     save_path = f"{motion_name}.pt"
-    print(f"Saving to {save_path}")
     torch.save({
         "fps": data["fps"],
         "joint_pos": robot_th.data,
         "root_pos": robot_trans.data,
         "root_quat": torch.as_tensor(robot_rot.as_quat(scalar_first=True)),
     }, save_path)
+    return save_path
 
-    def init_mesh(vertices, color=[0.3, 0.3, 0.3]):
-        mesh = o3d.geometry.TriangleMesh()
-        mesh.vertices = o3d.utility.Vector3dVector(vertices)
-        mesh.triangles = o3d.utility.Vector3iVector(body_model.faces)
-        mesh.compute_vertex_normals()
-        mesh.paint_uniform_color(color)
-        return mesh
-    
-    import open3d as o3d
 
-    vis = o3d.visualization.Visualizer()
-    vis.create_window()
-    mesh = init_mesh(result.vertices[0])
-    vis.add_geometry(mesh)
+@hydra.main(config_path=CONDIF_PATH, config_name="config", version_base=None)
+def main(cfg):
+    if os.path.isdir(cfg.motion_path):
+        motion_paths = glob.glob(os.path.join(cfg.motion_path, "**/*.npz"), recursive=True)
+    else:
+        motion_paths = [cfg.motion_path]
 
-    plane = o3d.geometry.TriangleMesh.create_box(4., 4., 0.01)
-    plane.translate([-2., -2., -0.005])
-    plane.compute_vertex_normals()
-    vis.add_geometry(plane)
+    print(f"Found {len(motion_paths)} motion files under {cfg.motion_path}")
 
-    frame = o3d.geometry.TriangleMesh.create_coordinate_frame()
-    frame.compute_vertex_normals()
-    vis.add_geometry(frame)
-
-    robot_pcd = o3d.geometry.PointCloud()
-    robot_pcd.points = o3d.utility.Vector3dVector(robot_keypoints[0])
-    robot_pcd.colors = o3d.utility.Vector3dVector(torch.tensor([0, 0, 1]).expand_as(robot_keypoints[0]))
-    vis.add_geometry(robot_pcd)
-
-    smpl_pcd = o3d.geometry.PointCloud()
-    smpl_pcd.points = o3d.utility.Vector3dVector(result.joints[0, smpl_joint_idx])
-    smpl_pcd.colors = o3d.utility.Vector3dVector(torch.tensor([1, 0, 0]).expand_as(result.joints[0, smpl_joint_idx]))
-    vis.add_geometry(smpl_pcd)
-
-    opt = vis.get_render_option()
-    # Set the point size
-    point_size = 10.0  # You can adjust this value according to your needs
-    opt.point_size = point_size
-
-    for t in range(T):
-        mesh.vertices = o3d.utility.Vector3dVector(result.vertices[t]-ground_offset)
-        # mesh.compute_vertex_normals()
-        # vis.update_geometry(mesh)
-
-        robot_pcd.points = o3d.utility.Vector3dVector(robot_keypoints[t])
-        vis.update_geometry(robot_pcd)
-
-        smpl_pcd.points = o3d.utility.Vector3dVector(smpl_keypoints[t])
-        vis.update_geometry(smpl_pcd)
-
-        vis.poll_events()
-        vis.update_renderer()
-    
-
+    from tqdm import tqdm
+    with mp.Pool(processes=4) as pool, tqdm(total=len(motion_paths)) as pbar:
+        results = [pool.apply_async(fit_motion, (cfg, motion_path)) for motion_path in motion_paths]
+        for result in results:
+            save_path = result.get()
+            print(f"Saved to {save_path}")
+            pbar.update(1)
+            pbar.refresh()
 
 if __name__ == "__main__":
     main()

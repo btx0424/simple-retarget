@@ -62,12 +62,12 @@ extend_config:
     pos: [0.0, 0.0, 0.6]
     rot: [1.0, 0.0, 0.0, 0.0]
   - joint_name: "left_toe_link"
-    parent_name: "left_ankle_pitch_link"
+    parent_name: "left_ankle_roll_link"
     pos: [0.08, 0.0, 0.0]
     rot: [1.0, 0.0, 0.0, 0.0]
 
   - joint_name: "right_toe_link"
-    parent_name: "right_ankle_pitch_link"
+    parent_name: "right_ankle_roll_link"
     pos: [0.08, 0.0, 0.0]
     rot: [1.0, 0.0, 0.0, 0.0]
     
