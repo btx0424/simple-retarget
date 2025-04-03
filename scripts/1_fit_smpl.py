@@ -1,6 +1,7 @@
 import os
 import torch
 import hydra
+import json
 import numpy as np
 import pytorch_kinematics as pk
 import xml.etree.ElementTree as ET
@@ -85,29 +86,29 @@ def main(cfg):
 
     body_model = SMPL(model_path=os.path.join(DATA_PATH, "smpl"), gender="neutral")
 
-    # which joints to match
-    robot_joint_idx = []
+    # which (robot body, SMPL joint) paris to match
+    robot_body_names = []
     smpl_joint_idx = []
-    robot_keypoints = []
     for robot_body_name, smpl_joint_name in cfg.robot.joint_matches:
-        robot_joint_idx.append(robot_body_names.index(robot_body_name))
+        robot_body_names.append(robot_body_name)
         smpl_joint_idx.append(SMPL_BONE_ORDER_NAMES.index(smpl_joint_name))
-        robot_keypoints.append(robot_body_pose[robot_body_name].get_matrix()[:, :3, 3])
-    
-    root_translation = robot_body_pose[robot_body_names[0]].get_matrix()[:, :3, 3]
+
+    root_translation = robot_body_pose[chain.get_link_names()[0]].get_matrix()[:, :3, 3]
+    robot_keypoints = [robot_body_pose[name].get_matrix()[:, :3, 3] for name in robot_body_names]
     robot_keypoints = torch.stack(robot_keypoints, dim=1)
     robot_keypoints = robot_keypoints - root_translation.unsqueeze(1)
     print(robot_keypoints)
 
+    # SMPL rest pose
     transl_0 = torch.zeros([1, 3])
     pose_0 = torch.zeros([1, 24, 3])
-    
     # align frame convention: SMPL is Y-up, but the robot is Z-up
     pose_0[:, 0] = torch.as_tensor(sRot.from_euler("xyz", [np.pi/2, 0., np.pi/2]).as_rotvec())
     # or equivalently
     # pose_0[:, 0] = torch.as_tensor(sRot.from_quat([.5, .5, .5, .5]).as_rotvec())
     
     # align SMPL's rest pose with the robot
+    # for example, bend elbows in tha cases of Unitree G1 and H1
     for key, value in cfg.robot.smpl_pose_modifier.items():
         rotvec = sRot.from_euler("xyz", eval(value)).as_rotvec()
         pose_0[:, SMPL_BONE_ORDER_NAMES.index(key)] = torch.as_tensor(rotvec)
@@ -176,12 +177,18 @@ def main(cfg):
         vis.add_geometry(pcd)
     
     
+    meta = {
+        "body_names": robot_body_names,
+        "joint_names": [joint.name for joint in chain.get_joints()]
+    }
+    with open("meta.json", "w") as f:
+        json.dump(meta, f, indent=4)
+
     path = os.path.join(os.path.dirname(__file__), f"{cfg.robot.humanoid_type}_shape.pt")
     torch.save({"betas": betas.data, "scale": scale.data}, path)
 
-    # Get the render option
+    # increase point size for better visualization
     opt = vis.get_render_option()
-    # Set the point size
     point_size = 10.0  # You can adjust this value according to your needs
     opt.point_size = point_size
     

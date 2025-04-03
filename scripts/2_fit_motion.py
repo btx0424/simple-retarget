@@ -151,17 +151,21 @@ def main(cfg):
         opt.step()
         if i % 10 == 0:
             print(f"iter {i}, loss {100 * loss.item():.3f}")
-    robot_keypoints = robot_keypoints.detach()
+    
+    with torch.no_grad():
+        robot_keypoints = get_robot_keypoints(robot_th, robot_trans)
     
     motion_name = motion_path.split("/")[-1].split(".")[0]
     save_path = f"{motion_name}.pt"
-    print(f"Saving to {save_path}")
-    torch.save({
+    data = {
         "fps": data["fps"],
-        "joint_pos": robot_th.data,
-        "root_pos": robot_trans.data,
-        "root_quat": torch.as_tensor(robot_rot.as_quat(scalar_first=True)),
-    }, save_path)
+        "joint_pos": robot_th.data.numpy(),
+        "keypoint_pos_w": robot_keypoints.data.numpy(),
+        "root_pos_w": robot_trans.data.numpy(),
+        "root_quat_w": robot_rot.as_quat(scalar_first=True),
+    }
+    print(f"Saving to {save_path}")
+    np.savez_compressed(save_path, **data)
 
     def init_mesh(vertices, color=[0.3, 0.3, 0.3]):
         mesh = o3d.geometry.TriangleMesh()

@@ -3,11 +3,10 @@ import torch
 import torch.nn as nn
 import hydra
 import numpy as np
+import glob
 import pytorch_kinematics as pk
 import xml.etree.ElementTree as ET
-import glob
 import multiprocessing as mp
-import pathlib
 
 from smplx import SMPL
 from scipy.spatial.transform import Rotation as sRot
@@ -152,16 +151,20 @@ def fit_motion(cfg, motion_path: str):
         opt.zero_grad()
         loss.backward()
         opt.step()
-    robot_keypoints = robot_keypoints.detach()
     
+    with torch.no_grad():
+        robot_keypoints = get_robot_keypoints(robot_th, robot_trans)
+
     motion_name = motion_path.split("/")[-1].split(".")[0]
-    save_path = f"{motion_name}.pt"
-    torch.save({
+    save_path = f"{motion_name}.npz"
+    data = {
         "fps": data["fps"],
-        "joint_pos": robot_th.data,
-        "root_pos": robot_trans.data,
-        "root_quat": torch.as_tensor(robot_rot.as_quat(scalar_first=True)),
-    }, save_path)
+        "joint_pos": robot_th.data.numpy(),
+        "body_pos_w": robot_keypoints.data.numpy(),
+        "root_pos_w": robot_trans.data.numpy(),
+        "root_quat_w": robot_rot.as_quat(scalar_first=True),
+    }
+    np.savez_compressed(save_path, **data)
     return save_path
 
 

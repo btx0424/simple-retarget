@@ -173,8 +173,10 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-data/smpl
 scripts/outputs
+data/**/*.npz
+data/**/*.pkl
+data/**/*.json
 
 *.pt
 *.TXT
