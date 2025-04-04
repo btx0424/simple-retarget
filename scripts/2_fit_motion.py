@@ -50,6 +50,7 @@ def build_chain(cfg) -> pk.Chain:
     root_body = root.find(".//body")
     root_joint = root.find(".//joint[@type='free']")
     root_body.remove(root_joint)
+    root_body.set("pos", "0 0 0")
     root_name = root_body.get("name")
 
     for extend_config in cfg.extend_config:
@@ -82,18 +83,16 @@ def main(cfg):
     motion_path = os.path.join(DATA_PATH, "motion", "0005_Walking001_poses.npz")
 
     with open(motion_path, "rb") as f:
-        raw = dict(np.load(f))
+        motion = dict(np.load(f))
     
-    T = raw["poses"].shape[0]
-    body_pose = raw["poses"][:, :66]
-    body_pose = torch.as_tensor(body_pose, dtype=torch.float32)
-    hand_pose = torch.zeros(T, 6)
+    T = motion["poses"].shape[0]
+    motion["poses"] = motion["poses"][:, :66].reshape(T, 22, 3)
+    body_pose = torch.as_tensor(motion["poses"][:, 1:], dtype=torch.float32)
+    hand_pose = torch.zeros(T, 2, 3)
     data = {
-        "pose": torch.cat([body_pose, hand_pose], dim=1).reshape(T, 24, 3),
-        "trans": torch.as_tensor(raw["trans"], dtype=torch.float32),
-        "gender": raw["gender"].item(),
-        "betas": torch.as_tensor(raw["betas"], dtype=torch.float32),
-        "fps": raw["mocap_framerate"].item()
+        "body_pose": torch.cat([body_pose, hand_pose], dim=1),
+        "global_orient": torch.as_tensor(motion["poses"][:, 0], dtype=torch.float32),
+        "trans": torch.as_tensor(motion["trans"], dtype=torch.float32),
     }
 
     body_model = SMPL(model_path=os.path.join(DATA_PATH, "smpl"), gender="neutral")
@@ -104,10 +103,9 @@ def main(cfg):
     with torch.no_grad():
         result = body_model.forward(
             fitted_shape["betas"],
-            # data["betas"][:body_model.num_betas].unsqueeze(0),
-            body_pose=data["pose"][:, 1:].reshape(T, 69),
-            global_orient=data["pose"][:, 0].reshape(T, 3),
-            transl=data["trans"].reshape(T, 3)
+            body_pose=data["body_pose"].reshape(T, 69),
+            global_orient=data["global_orient"],
+            transl=data["trans"]
         )
     
     # which joints to match
@@ -122,7 +120,7 @@ def main(cfg):
     ground_offset = result.vertices[:, :, 2].min()
     smpl_keypoints = result.joints[:, smpl_joint_idx] - ground_offset
 
-    robot_rot = sRot.from_rotvec(data["pose"][:, 0]) * sRot.from_euler("xyz", [np.pi/2, 0., np.pi/2]).inv()
+    robot_rot = sRot.from_rotvec(data["global_orient"]) * sRot.from_euler("xyz", [np.pi/2, 0., np.pi/2]).inv()
     robot_rotmat = torch.as_tensor(robot_rot.as_matrix(), dtype=torch.float32)
 
     robot_th = torch.nn.Parameter(torch.zeros(T, chain.n_joints))        
@@ -137,9 +135,8 @@ def main(cfg):
             body_pos[name].get_matrix()[:, :3, 3]
             for name in robot_body_names
         ], dim=1)
-        root_translation = body_pos["pelvis"].get_matrix()[:, :3, 3].unsqueeze(1)
         # convert to world frame
-        robot_keypoints = robot_rotmat.unsqueeze(1) @ (robot_keypoints - root_translation).unsqueeze(-1)
+        robot_keypoints = robot_rotmat.unsqueeze(1) @ robot_keypoints.unsqueeze(-1)
         robot_keypoints = robot_keypoints.squeeze(-1) + trans.unsqueeze(1)
         return robot_keypoints
         
@@ -158,7 +155,6 @@ def main(cfg):
     motion_name = motion_path.split("/")[-1].split(".")[0]
     save_path = f"{motion_name}.pt"
     data = {
-        "fps": data["fps"],
         "joint_pos": robot_th.data.numpy(),
         "keypoint_pos_w": robot_keypoints.data.numpy(),
         "root_pos_w": robot_trans.data.numpy(),

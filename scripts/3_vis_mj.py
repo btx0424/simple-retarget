@@ -59,7 +59,7 @@ def main(cfg):
 
     motion_paths = glob.glob(os.path.join(cfg.motion_path, "*.npz"))
     motions = []
-    target_fps = 50
+    target_fps = cfg.target_fps
     for motion_path in motion_paths:
         motion = dict(np.load(motion_path))
         if motion["fps"] != target_fps:

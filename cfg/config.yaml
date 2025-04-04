@@ -3,3 +3,4 @@ defaults:
   - _self_
 
 motion_path: ???
+target_fps: 50

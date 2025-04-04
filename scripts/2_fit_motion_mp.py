@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 import multiprocessing as mp
 
 from smplx import SMPL
-from scipy.spatial.transform import Rotation as sRot
+from scipy.spatial.transform import Rotation as sRot, Slerp
 
 OMP_NUM_THREADS = int(os.environ.get("OMP_NUM_THREADS", "1"))
 if OMP_NUM_THREADS <= 1:
@@ -56,6 +56,7 @@ def build_chain(cfg) -> pk.Chain:
     root_body = root.find(".//body")
     root_joint = root.find(".//joint[@type='free']")
     root_body.remove(root_joint)
+    root_body.set("pos", "0 0 0")
     root_name = root_body.get("name")
 
     for extend_config in cfg.extend_config:
@@ -79,24 +80,48 @@ def build_chain(cfg) -> pk.Chain:
     os.chdir(cwd)
     return chain
 
+
+def lerp(x, xp, fp):
+    return np.stack([np.interp(x, xp, fp[:, i]) for i in range(fp.shape[1])], axis=1)
+
+
+def slerp(x, xp, fp):
+    s = Slerp(xp, sRot.from_rotvec(fp))
+    return s(x).as_rotvec()
+
+
 def fit_motion(cfg, motion_path: str):
-    with open(motion_path, "rb") as f:
-        raw = dict(np.load(f))
-    print(motion_path)
     
+    with open(motion_path, "rb") as f:
+        motion = dict(np.load(f))
+    
+    fps = int(motion["mocap_framerate"].item())
+    T = motion["poses"].shape[0]
+    motion["poses"] = motion["poses"][:, :66].reshape(T, 22, 3)
+    if fps != int(cfg.target_fps):
+        end_t =  motion["poses"].shape[0] / fps
+        xp = np.arange(0, end_t, 1 / fps)
+        x = np.arange(0, end_t, 1 / int(cfg.target_fps))
+        if x[-1] > xp[-1]:
+            x = x[:-1]
+        motion["poses"] = np.stack([
+            slerp(x, xp, motion["poses"][:, i])
+            for i in range(22)
+        ], axis=1)
+        motion["trans"] = lerp(x, xp, motion["trans"])
+    
+    print(f"Retargeting motion at {motion_path} from {fps} to {cfg.target_fps}")
+
     chain = build_chain(cfg.robot)
     chain.forward_kinematics(torch.zeros(1, chain.n_joints))
 
-    T = raw["poses"].shape[0]
-    body_pose = raw["poses"][:, :66]
-    body_pose = torch.as_tensor(body_pose, dtype=torch.float32)
-    hand_pose = torch.zeros(T, 6)
+    T = motion["poses"].shape[0]
+    body_pose = torch.as_tensor(motion["poses"][:, 1:], dtype=torch.float32)
+    hand_pose = torch.zeros(T, 2, 3)
     data = {
-        "pose": torch.cat([body_pose, hand_pose], dim=1).reshape(T, 24, 3),
-        "trans": torch.as_tensor(raw["trans"], dtype=torch.float32),
-        "gender": raw["gender"].item(),
-        "betas": torch.as_tensor(raw["betas"], dtype=torch.float32),
-        "fps": raw["mocap_framerate"].item()
+        "body_pose": torch.cat([body_pose, hand_pose], dim=1),
+        "global_orient": torch.as_tensor(motion["poses"][:, 0], dtype=torch.float32),
+        "trans": torch.as_tensor(motion["trans"], dtype=torch.float32),
     }
     body_model = SMPL(model_path=os.path.join(DATA_PATH, "smpl"), gender="neutral")
 
@@ -106,10 +131,9 @@ def fit_motion(cfg, motion_path: str):
     with torch.no_grad():
         result = body_model.forward(
             fitted_shape["betas"],
-            # data["betas"][:body_model.num_betas].unsqueeze(0),
-            body_pose=data["pose"][:, 1:].reshape(T, 69),
-            global_orient=data["pose"][:, 0].reshape(T, 3),
-            transl=data["trans"].reshape(T, 3)
+            body_pose=data["body_pose"].reshape(T, 69),
+            global_orient=data["global_orient"],
+            transl=data["trans"]
         )
     
     # which joints to match
@@ -122,9 +146,10 @@ def fit_motion(cfg, motion_path: str):
     # since the betas are changed and so are the SMPL body morphology,
     # we need to make some corrections to avoid ground pentration
     ground_offset = result.vertices[:, :, 2].min()
-    smpl_keypoints = result.joints[:, smpl_joint_idx] - ground_offset
+    smpl_keypoints_w = result.joints[:, smpl_joint_idx] - ground_offset
 
-    robot_rot = sRot.from_rotvec(data["pose"][:, 0]) * sRot.from_euler("xyz", [np.pi/2, 0., np.pi/2]).inv()
+    # again, convert between Y-up and Z-up
+    robot_rot = sRot.from_rotvec(data["global_orient"]) * sRot.from_euler("xyz", [np.pi/2, 0., np.pi/2]).inv()
     robot_rotmat = torch.as_tensor(robot_rot.as_matrix(), dtype=torch.float32)
 
     robot_th = torch.nn.Parameter(torch.zeros(T, chain.n_joints))        
@@ -133,36 +158,40 @@ def fit_motion(cfg, motion_path: str):
 
     indices = chain.get_all_frame_indices()
     
-    def get_robot_keypoints(th: torch.Tensor, trans: torch.Tensor):
-        body_pos = chain.forward_kinematics(th, indices) # in robot's root frame
-        robot_keypoints = torch.stack([
-            body_pos[name].get_matrix()[:, :3, 3]
-            for name in robot_body_names
-        ], dim=1)
-        root_translation = body_pos["pelvis"].get_matrix()[:, :3, 3].unsqueeze(1)
-        # convert to world frame
-        robot_keypoints = robot_rotmat.unsqueeze(1) @ (robot_keypoints - root_translation).unsqueeze(-1)
-        robot_keypoints = robot_keypoints.squeeze(-1) + trans.unsqueeze(1)
-        return robot_keypoints
+    def mat_rotate(rotmat, v):
+        return (rotmat @ v.unsqueeze(-1)).squeeze(-1)
         
     for i in range(200):
-        robot_keypoints = get_robot_keypoints(robot_th, robot_trans)
-        loss = nn.functional.mse_loss(robot_keypoints, smpl_keypoints)
+        fk_output = chain.forward_kinematics(robot_th, indices) # in robot's root frame
+        robot_keypoints_b = torch.stack([
+            fk_output[name].get_matrix()[:, :3, 3]
+            for name in robot_body_names
+        ], dim=1)        
+        # convert to world frame
+        robot_keypoints_w = robot_trans.unsqueeze(1) + mat_rotate(robot_rotmat.unsqueeze(1), robot_keypoints_b)
+
+        loss = nn.functional.mse_loss(robot_keypoints_w, smpl_keypoints_w)
         opt.zero_grad()
         loss.backward()
         opt.step()
     
     with torch.no_grad():
-        robot_keypoints = get_robot_keypoints(robot_th, robot_trans)
+        robot_keypoints_b = torch.stack([
+            fk_output[name].get_matrix()[:, :3, 3]
+            for name in robot_body_names
+        ], dim=1)        
+        # convert to world frame
+        robot_keypoints_w = robot_trans.unsqueeze(1) + mat_rotate(robot_rotmat.unsqueeze(1), robot_keypoints_b)
 
     motion_name = motion_path.split("/")[-1].split(".")[0]
     save_path = f"{motion_name}.npz"
     data = {
-        "fps": data["fps"],
+        "fps": int(cfg.target_fps),
         "joint_pos": robot_th.data.numpy(),
-        "body_pos_w": robot_keypoints.data.numpy(),
         "root_pos_w": robot_trans.data.numpy(),
         "root_quat_w": robot_rot.as_quat(scalar_first=True),
+        "body_pos_w": robot_keypoints_w.data.numpy(),
+        "body_pos_b": robot_keypoints_b.data.numpy(),
     }
     np.savez_compressed(save_path, **data)
     return save_path
@@ -175,6 +204,7 @@ def main(cfg):
     else:
         motion_paths = [cfg.motion_path]
 
+    motion_paths = [path for path in motion_paths if "Walk" in path]
     print(f"Found {len(motion_paths)} motion files under {cfg.motion_path}")
 
     from tqdm import tqdm
