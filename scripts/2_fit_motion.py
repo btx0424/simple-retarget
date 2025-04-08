@@ -47,11 +47,11 @@ def build_chain(cfg) -> pk.Chain:
     root = tree.getroot()
 
     # remove the free joint of the base link
-    root_body = root.find(".//body")
+    root_name = cfg.get("root_name", "pelvis")
+    root_body = root.find(f".//body[@name='{root_name}']")
     root_joint = root.find(".//joint[@type='free']")
     root_body.remove(root_joint)
     root_body.set("pos", "0 0 0")
-    root_name = root_body.get("name")
 
     for extend_config in cfg.extend_config:
         parent = root.find(f".//body[@name='{extend_config.parent_name}']")

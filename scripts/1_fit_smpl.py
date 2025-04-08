@@ -47,10 +47,10 @@ def build_chain(cfg) -> pk.Chain:
     root = tree.getroot()
 
     # remove the free joint of the base link
-    root_body = root.find(".//body")
+    root_name = cfg.get("root_name", "pelvis")
+    root_body = root.find(f".//body[@name='{root_name}']")
     root_joint = root.find(".//joint[@type='free']")
     root_body.remove(root_joint)
-    root_name = root_body.get("name")
 
     for extend_config in cfg.extend_config:
         parent = root.find(f".//body[@name='{extend_config.parent_name}']")
@@ -78,7 +78,6 @@ def build_chain(cfg) -> pk.Chain:
 def main(cfg):
     chain = build_chain(cfg.robot)
     chain.print_tree()
-    robot_body_names = chain.get_link_names()
 
     # compute the rest-pose body transforms in the root (base link)'s frame
     th = torch.zeros([1, chain.n_joints])
@@ -131,7 +130,7 @@ def main(cfg):
     vertices = []
     smpl_keypoints_history = []
 
-    ITERS = 200
+    ITERS = 300
     for i in range(ITERS):
         result = body_model.forward(
             betas,
@@ -178,7 +177,7 @@ def main(cfg):
     
     
     meta = {
-        "body_names": robot_body_names,
+        "body_names": chain.get_link_names(),
         "joint_names": [joint.name for joint in chain.get_joints()]
     }
     with open("meta.json", "w") as f:

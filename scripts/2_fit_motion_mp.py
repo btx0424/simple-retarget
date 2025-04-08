@@ -53,11 +53,11 @@ def build_chain(cfg) -> pk.Chain:
     root = tree.getroot()
 
     # remove the free joint of the base link
-    root_body = root.find(".//body")
+    root_name = cfg.get("root_name", "pelvis")
+    root_body = root.find(f".//body[@name='{root_name}']")
     root_joint = root.find(".//joint[@type='free']")
     root_body.remove(root_joint)
     root_body.set("pos", "0 0 0")
-    root_name = root_body.get("name")
 
     for extend_config in cfg.extend_config:
         parent = root.find(f".//body[@name='{extend_config.parent_name}']")
@@ -178,7 +178,7 @@ def fit_motion(cfg, motion_path: str):
     with torch.no_grad():
         robot_keypoints_b = torch.stack([
             fk_output[name].get_matrix()[:, :3, 3]
-            for name in robot_body_names
+            for name in chain.get_link_names()
         ], dim=1)        
         # convert to world frame
         robot_keypoints_w = robot_trans.unsqueeze(1) + mat_rotate(robot_rotmat.unsqueeze(1), robot_keypoints_b)
